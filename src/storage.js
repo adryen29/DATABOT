@@ -216,6 +216,7 @@ module.exports = {
   deleteChannel,
   listChannels,
   findChannelCategory,
+  getChannelRecord,
   setField,
   getField,
   getAllFields,
