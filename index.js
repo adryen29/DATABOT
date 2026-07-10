@@ -10,7 +10,25 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
+const http = require("http");
 const { Client, GatewayIntentBits, Partials, ChannelType } = require("discord.js");
+
+// ---------------------------------------------------------------------------
+// KEEP-ALIVE HTTP SERVER — only needed if this is deployed as a Render
+// "Web Service" (which requires something listening on process.env.PORT).
+// If deployed as a "Background Worker" instead, this block is unnecessary
+// but harmless to leave in.
+// ---------------------------------------------------------------------------
+
+const PORT = process.env.PORT || 3000;
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Bot is running.");
+  })
+  .listen(PORT, () => {
+    console.log(`Keep-alive HTTP server listening on port ${PORT}`);
+  });
 
 // ---------------------------------------------------------------------------
 // SCHEMA — which field names get hashed, encrypted, or stored plain
