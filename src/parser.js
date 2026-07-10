@@ -104,6 +104,14 @@ function parse(input) {
         return { action: "DELETE_CATEGORY", name: tokens[2].value };
       }
       if (noun === "CHANNEL") {
+        // DELETE CHANNEL ALL IN <category> — wipes every channel inside a
+        // category (Discord + storage) but keeps the category itself.
+        if (kw(tokens[2]) === "ALL") {
+          requireArgs(tokens, 5, "DELETE CHANNEL ALL IN <category>");
+          if (kw(tokens[3]) !== "IN")
+            throw new ParseError('Expected "IN" — usage: DELETE CHANNEL ALL IN <category>');
+          return { action: "CLEAR_CATEGORY", category: tokens[4].value };
+        }
         requireArgs(tokens, 3, "DELETE CHANNEL <name>");
         return { action: "DELETE_CHANNEL", name: tokens[2].value };
       }
