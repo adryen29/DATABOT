@@ -10,25 +10,8 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
-const http = require("http");
+const express = require("express");
 const { Client, GatewayIntentBits, Partials, ChannelType } = require("discord.js");
-
-// ---------------------------------------------------------------------------
-// KEEP-ALIVE HTTP SERVER — only needed if this is deployed as a Render
-// "Web Service" (which requires something listening on process.env.PORT).
-// If deployed as a "Background Worker" instead, this block is unnecessary
-// but harmless to leave in.
-// ---------------------------------------------------------------------------
-
-const PORT = process.env.PORT || 3000;
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Bot is running.");
-  })
-  .listen(PORT, () => {
-    console.log(`Keep-alive HTTP server listening on port ${PORT}`);
-  });
 
 // ---------------------------------------------------------------------------
 // SCHEMA — which field names get hashed, encrypted, or stored plain
@@ -621,6 +604,16 @@ const client = new Client({
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`Command prefix: ${PREFIX}`);
+  activeGuild = process.env.GUILD_ID
+    ? client.guilds.cache.get(process.env.GUILD_ID)
+    : client.guilds.cache.first();
+  if (!activeGuild) {
+    console.warn(
+      "Warning: could not resolve a guild. Set GUILD_ID in .env, or make sure the bot is in a server."
+    );
+  } else {
+    console.log(`API will act on guild: ${activeGuild.name} (${activeGuild.id})`);
+  }
 });
 
 client.on("messageCreate", async (message) => {
@@ -651,6 +644,181 @@ client.on("messageCreate", async (message) => {
       await message.reply(`❌ ${err.message}`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------
+// REST API — lets other apps (a website, a game server, a script) talk to
+// the bot over plain HTTP instead of through Discord chat.
+//
+// Auth: every /api/* request must include a header:
+//   x-api-key: <your API_KEY from .env>
+// Requests without it, or with the wrong key, get 401.
+//
+// The API can only act on ONE guild — set GUILD_ID in .env to the server
+// this bot manages. If unset, it falls back to whichever guild the bot
+// first sees (fine for a single-server bot, but set it explicitly to be
+// safe once you invite the bot to more than one server).
+// ---------------------------------------------------------------------------
+
+const app = express();
+app.use(express.json());
+
+let activeGuild = null;
+
+function requireGuild(res) {
+  if (!activeGuild) {
+    res.status(503).json({ error: "Bot is not connected to Discord yet. Try again shortly." });
+    return null;
+  }
+  return activeGuild;
+}
+
+function requireApiKey(req, res, next) {
+  const key = req.header("x-api-key");
+  if (!process.env.API_KEY) {
+    res.status(500).json({ error: "Server misconfigured: API_KEY is not set in .env." });
+    return;
+  }
+  if (!key || key !== process.env.API_KEY) {
+    res.status(401).json({ error: "Missing or invalid x-api-key header." });
+    return;
+  }
+  next();
+}
+
+// Health check — no auth required, so Render/uptime pings still work.
+app.get("/", (req, res) => {
+  res.status(200).send("Bot is running.");
+});
+
+app.use("/api", requireApiKey);
+
+// Wraps a command string through the same parser + dispatcher the Discord
+// chat interface uses, so behavior (encryption, embed sync, validation)
+// is always identical between Discord and the API.
+async function runCommand(commandString, res) {
+  const guild = requireGuild(res);
+  if (!guild) return;
+  try {
+    const ast = parseCommand(commandString);
+    const result = await dispatch(ast, guild);
+    res.status(200).json({ ok: true, result });
+  } catch (err) {
+    if (err instanceof ParseError) {
+      res.status(400).json({ ok: false, error: err.message });
+    } else {
+      console.error(err);
+      res.status(400).json({ ok: false, error: err.message });
+    }
+  }
+}
+
+// Quotes a value so it survives the tokenizer safely even if it contains
+// spaces. (Values containing a literal double-quote aren't supported —
+// the tokenizer doesn't escape them.)
+function q(value) {
+  return `"${String(value).replace(/"/g, "")}"`;
+}
+
+// --- Generic escape hatch: run any raw DSL command ---
+// POST /api/command   { "command": "CREATE CATEGORY Logs" }
+app.post("/api/command", (req, res) => {
+  const { command } = req.body || {};
+  if (!command || typeof command !== "string") {
+    return res.status(400).json({ ok: false, error: 'Body must include a "command" string.' });
+  }
+  runCommand(command, res);
+});
+
+// --- Categories ---
+
+app.get("/api/categories", (req, res) => {
+  try {
+    res.json({ ok: true, categories: storage.listCategories() });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/categories", (req, res) => {
+  const { name } = req.body || {};
+  if (!name) return res.status(400).json({ ok: false, error: '"name" is required.' });
+  runCommand(`CREATE CATEGORY ${q(name)}`, res);
+});
+
+app.delete("/api/categories/:name", (req, res) => {
+  runCommand(`DELETE CATEGORY ${q(req.params.name)}`, res);
+});
+
+// Wipes every channel inside a category, keeps the category itself.
+app.delete("/api/categories/:name/channels", (req, res) => {
+  runCommand(`DELETE CHANNEL ALL IN ${q(req.params.name)}`, res);
+});
+
+// --- Channels ---
+
+app.get("/api/categories/:name/channels", (req, res) => {
+  try {
+    res.json({ ok: true, channels: storage.listChannels(req.params.name) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post("/api/channels", (req, res) => {
+  const { name, category } = req.body || {};
+  if (!name || !category)
+    return res.status(400).json({ ok: false, error: '"name" and "category" are required.' });
+  runCommand(`CREATE CHANNEL ${q(name)} IN ${q(category)}`, res);
+});
+
+app.delete("/api/channels/:name", (req, res) => {
+  runCommand(`DELETE CHANNEL ${q(req.params.name)}`, res);
+});
+
+// --- Fields ---
+
+app.get("/api/channels/:name/fields", (req, res) => {
+  try {
+    const category = storage.findChannelCategory(req.params.name);
+    if (!category) return res.status(404).json({ ok: false, error: "Channel not found." });
+    res.json({ ok: true, fields: storage.getAllFields(category, req.params.name) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.get("/api/channels/:name/fields/:field", (req, res) => {
+  try {
+    const category = storage.findChannelCategory(req.params.name);
+    if (!category) return res.status(404).json({ ok: false, error: "Channel not found." });
+    res.json({ ok: true, value: storage.getField(category, req.params.name, req.params.field) });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.put("/api/channels/:name/fields/:field", (req, res) => {
+  const { value } = req.body || {};
+  if (value === undefined) return res.status(400).json({ ok: false, error: '"value" is required.' });
+  runCommand(`SET ${q(req.params.name)} ${q(req.params.field)} = ${q(value)}`, res);
+});
+
+app.delete("/api/channels/:name/fields/:field", (req, res) => {
+  runCommand(`UNSET ${q(req.params.name)} ${q(req.params.field)}`, res);
+});
+
+// Verify a hashed field (e.g. password) without ever exposing the real value.
+app.post("/api/verify", (req, res) => {
+  const { channel, field, value } = req.body || {};
+  if (!channel || !field || value === undefined)
+    return res.status(400).json({ ok: false, error: '"channel", "field", and "value" are required.' });
+  runCommand(`VERIFY ${q(channel)} ${q(field)} ${q(value)}`, res);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`REST API + health check listening on port ${PORT}`);
 });
 
 client.login(process.env.DISCORD_TOKEN);
