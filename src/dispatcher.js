@@ -55,6 +55,17 @@ async function dispatch(ast, guild) {
       return `🗑️ Channel **${ast.name}** deleted.`;
     }
 
+    case "CLEAR_CATEGORY": {
+      const channels = storage.listChannels(ast.category); // throws if category missing
+      if (!channels.length) return `**${ast.category}** already has no channels.`;
+      for (const name of channels) {
+        const record = storage.getChannelRecord(ast.category, name);
+        await discord.deleteChannel(guild, record.discordChannelId);
+        storage.deleteChannel(ast.category, name);
+      }
+      return `🗑️ Deleted ${channels.length} channel(s) from **${ast.category}**. The category itself was kept.`;
+    }
+
     case "LIST_CATEGORIES": {
       const cats = storage.listCategories();
       if (!cats.length) return "No categories yet.";
